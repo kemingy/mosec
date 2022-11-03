@@ -14,10 +14,10 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      PR: ${{ github.event.number }}
+      PR: ${{ github.event.pull_request.html_url }}
     steps:
-      - uses: actions/checkout@v3
-      - run: gh pr edit $PR --remove-label documentation --remove-label enhancement  --remove-label bug_fix  --remove-label refactoring --remove-label chore
+      # - uses: actions/checkout@v3
+      # - run: gh pr edit $PR --remove-label documentation --remove-label enhancement  --remove-label bug_fix  --remove-label refactoring --remove-label chore
       - run: gh pr edit $PR --add-label documentation
         if: ${{ startsWith(github.event.pull_request.title, 'doc') }}
       - run: gh pr edit $PR --add-label enhancement
@@ -28,4 +28,3 @@ jobs:
         if: ${{ startsWith(github.event.pull_request.title, 'refact') }}
       - run: gh pr edit $PR --add-label chore
         if: ${{ startsWith(github.event.pull_request.title, 'chore') }}
-
