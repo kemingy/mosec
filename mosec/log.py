@@ -95,13 +95,14 @@ class JSONFormat(MosecFormat):
         """Format to a JSON string."""
         # yet another mypy type-check issue
         # https://github.com/python/mypy/issues/2900
+        module = "mosec:" if "mosec/mosec" in record.pathname else record.filename
         res: MutableMapping[str, Any] = {
             "timestamp": self.formatTime(record),
             "level": record.levelname,
             "fields": {
                 "message": record.getMessage(),
             },
-            "target": f"{record.filename}:{record.funcName}",
+            "target": f"{module}:{record.funcName}",
         }
         if record.exc_info:
             if not record.exc_text:
