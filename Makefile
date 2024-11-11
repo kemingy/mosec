@@ -72,7 +72,7 @@ lint:
 	@-rm mosec/_version.py
 	@pyright --stats
 	@mypy --non-interactive --install-types ${PY_SOURCE_FILES}
-	@cargo +nightly fmt -- --check
+	@cargo +nightly fmt --check
 
 semantic_lint:
 	@cargo clippy -- -D warnings

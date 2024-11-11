@@ -73,7 +73,7 @@ async fn run(conf: &Config) {
 
     let metrics_instance = Metrics::init_with_namespace(&conf.namespace, conf.timeout);
     METRICS.set(metrics_instance).unwrap();
-    let mut task_manager = TaskManager::new(conf.timeout);
+    let mut task_manager = TaskManager::new(conf.capacity, conf.timeout);
     let barrier = task_manager.init_from_config(conf);
     TASK_MANAGER.set(task_manager).unwrap();
 

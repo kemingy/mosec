@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::ops::Add;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -20,6 +21,8 @@ use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
 use bytes::Bytes;
+use heapless::LinearMap;
+use nohash_hasher::IntMap;
 use tokio::sync::{mpsc, oneshot, Barrier};
 use tokio::time;
 use tracing::{debug, error, info, warn};
@@ -28,6 +31,9 @@ use crate::config::Config;
 use crate::errors::ServiceError;
 use crate::metrics::{CodeLabel, Metrics, DURATION_LABEL};
 use crate::protocol::communicate;
+
+const LINEAR_MAP_CAPACITY: usize = 16;
+const HASH_MAP_CAPACITY_SCALE: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, derive_more::Display, derive_more::Error)]
 pub(crate) enum TaskCode {
@@ -86,13 +92,14 @@ impl Task {
 
 #[derive(Debug)]
 pub(crate) struct TaskManager {
-    table: Mutex<HashMap<u32, Task>>,
-    notifiers: Mutex<HashMap<u32, oneshot::Sender<()>>>,
-    stream_senders: Mutex<HashMap<u32, mpsc::Sender<(Bytes, TaskCode)>>>,
+    capacity: u32,
+    table: Mutex<IntMap<u32, Task>>,
+    notifiers: Mutex<IntMap<u32, oneshot::Sender<()>>>,
+    stream_senders: Mutex<IntMap<u32, mpsc::Sender<(Bytes, TaskCode)>>>,
     timeout: Duration,
     current_id: Mutex<u32>,
-    senders: HashMap<String, Vec<async_channel::Sender<u32>>>,
-    mime_types: HashMap<String, String>,
+    senders: LinearMap<String, Vec<async_channel::Sender<u32>>, LINEAR_MAP_CAPACITY>,
+    mime_types: LinearMap<String, String, LINEAR_MAP_CAPACITY>,
     shutdown: AtomicBool,
 }
 
@@ -103,15 +110,25 @@ impl TaskManager {
         TASK_MANAGER.get().expect("task manager is not initialized")
     }
 
-    pub(crate) fn new(timeout: u64) -> Self {
+    pub(crate) fn new(capacity: usize, timeout: u64) -> Self {
         Self {
-            table: Mutex::new(HashMap::new()),
-            notifiers: Mutex::new(HashMap::new()),
-            stream_senders: Mutex::new(HashMap::new()),
+            capacity: capacity as u32,
+            table: Mutex::new(IntMap::with_capacity_and_hasher(
+                capacity * HASH_MAP_CAPACITY_SCALE,
+                Default::default(),
+            )),
+            notifiers: Mutex::new(IntMap::with_capacity_and_hasher(
+                capacity * HASH_MAP_CAPACITY_SCALE,
+                Default::default(),
+            )),
+            stream_senders: Mutex::new(IntMap::with_capacity_and_hasher(
+                capacity * HASH_MAP_CAPACITY_SCALE,
+                Default::default(),
+            )),
             timeout: Duration::from_millis(timeout),
             current_id: Mutex::new(0),
-            senders: HashMap::new(),
-            mime_types: HashMap::new(),
+            senders: LinearMap::new(),
+            mime_types: LinearMap::new(),
             shutdown: AtomicBool::new(false),
         }
     }
@@ -140,13 +157,16 @@ impl TaskManager {
 
         for route in &conf.routes {
             self.mime_types
-                .insert(route.endpoint.clone(), route.mime.clone());
+                .insert(route.endpoint.clone(), route.mime.clone())
+                .expect("failed to add mime type");
             let worker_senders = route
                 .workers
                 .iter()
                 .map(|w| worker_channel[w].1.clone())
                 .collect();
-            self.senders.insert(route.endpoint.clone(), worker_senders);
+            self.senders
+                .insert(route.endpoint.clone(), worker_senders)
+                .expect("failed to add endpoint sender");
         }
 
         barrier
@@ -276,7 +296,10 @@ impl TaskManager {
         {
             let mut current_id = self.current_id.lock().unwrap();
             id = *current_id;
-            *current_id = id.wrapping_add(1);
+            *current_id = id.add(1);
+            if *current_id == self.capacity * HASH_MAP_CAPACITY_SCALE as u32 {
+                *current_id = 0;
+            }
         }
         {
             let mut notifiers = self.notifiers.lock().unwrap();
@@ -429,7 +452,7 @@ mod tests {
 
     #[tokio::test]
     async fn task_manager_add_new_task() {
-        let mut task_manager = TaskManager::new(1000);
+        let mut task_manager = TaskManager::new(4, 1000);
         task_manager.init_from_config(&Config::default());
         let (id, _rx) = task_manager
             .add_new_task(Bytes::from_static(b"hello"), DEFAULT_ENDPOINT)
@@ -455,7 +478,7 @@ mod tests {
 
     #[tokio::test]
     async fn task_manager_timeout() {
-        let mut task_manager = TaskManager::new(1);
+        let mut task_manager = TaskManager::new(4, 1);
         task_manager.init_from_config(&Config::default());
 
         // wait until this task timeout
@@ -467,7 +490,7 @@ mod tests {
 
     #[tokio::test]
     async fn task_manager_too_many_request() {
-        let mut task_manager = TaskManager::new(1);
+        let mut task_manager = TaskManager::new(4, 1);
         let mut config = Config::default();
         // capacity > 0
         config.capacity = 1;
@@ -487,7 +510,7 @@ mod tests {
 
     #[tokio::test]
     async fn task_manager_graceful_shutdown() {
-        let mut task_manager = TaskManager::new(1);
+        let mut task_manager = TaskManager::new(4, 1);
         task_manager.init_from_config(&Config::default());
         assert!(!task_manager.is_shutdown());
         task_manager.shutdown().await;
@@ -496,7 +519,7 @@ mod tests {
 
     #[tokio::test]
     async fn task_manager_graceful_shutdown_after_timeout() {
-        let mut task_manager = TaskManager::new(10);
+        let mut task_manager = TaskManager::new(4, 10);
         task_manager.init_from_config(&Config::default());
         {
             // block with one task in the channel
@@ -516,7 +539,7 @@ mod tests {
 
     #[tokio::test]
     async fn task_manager_get_and_update_task() {
-        let mut task_manager = TaskManager::new(1);
+        let mut task_manager = TaskManager::new(4, 1);
         task_manager.init_from_config(&Config::default());
 
         // add some tasks to the table
